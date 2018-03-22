@@ -17,16 +17,15 @@
 package org.apache.spark.sql
 
 import com.databricks.spark.sql.perf.tpcds.Tables
-
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, FileUtil, Path}
-
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.functions._
 import org.apache.spark.util.Utils
 
 import scala.collection.mutable
 
-object OapBenchmarkDataBuilder extends OapPerfSuiteContext {
+object OapBenchmarkDataBuilder extends OapPerfSuiteContext with Logging {
 
   private val defaultProperties = Map(
     "oap.benchmark.compression.codec"     -> "gzip",
@@ -34,7 +33,7 @@ object OapBenchmarkDataBuilder extends OapPerfSuiteContext {
     "oap.benchmark.tpcds.tool.dir"        -> "/home/oap/tpcds-kit/tools",
     "oap.benchmark.hdfs.file.root.dir"    -> "/user/oap/oaptest/",
     "oap.benchmark.database.prefix"       -> "",
-    "oap.benchmark.database.postfix"       -> "",
+    "oap.benchmark.database.postfix"      -> "",
     "oap.benchmark.tpcds.data.scale"      -> "200",
     "oap.benchmark.tpcds.data.partition"  -> "80"
   )
@@ -48,26 +47,28 @@ object OapBenchmarkDataBuilder extends OapPerfSuiteContext {
       case "parquet" => s"parquet_tpcds_$dataScale"
       case _ => "default"
     }
+
     prefix + baseName + postfix
   }
 
   def formatTableLocation(rootDir: String, versionNum: String, tableFormat: String): String = {
-    s"${rootDir}/${versionNum}/tpcds/${getDatabase(tableFormat)}"
+    s"${rootDir}/${versionNum}/tpcds/${getDatabase(tableFormat)}/"
   }
 
-  private val properties = new mutable.HashMap[String, String] ++= defaultProperties
+  private val properties = {
+    try {
+      new mutable.HashMap[String, String]() ++=
+        Utils.getPropertiesFromFile("./oap-benchmark-default.conf")
+    } catch {
+      case e: IllegalArgumentException => {
+        logWarning(e.getMessage + ". Use default setting!")
+        defaultProperties
+      }
+    }
+  }
 
   override def beforeAll(conf: Map[String, String] = Map.empty): Unit = {
     super.beforeAll(conf)
-    try {
-      Utils.getPropertiesFromFile("./oap-benchmark-default.conf").foreach{ case (k, v) =>
-        properties(k) = v
-      }
-    } catch {
-      case e: IllegalArgumentException => {
-        println(e.getMessage + ". Use default setting!")
-      }
-    }
   }
 
   def generateTables(dataFormats: Array[String] = Array("oap", "parquet")): Unit = {
@@ -80,7 +81,7 @@ object OapBenchmarkDataBuilder extends OapPerfSuiteContext {
 
     sqlContext.setConf("spark.sql.parquet.compression.codec", codec)
     dataFormats.foreach{ format =>
-      val loc = formatTableLocation(hdfsRootDir, versionNum, getDatabase(format))
+      val loc = formatTableLocation(hdfsRootDir, versionNum, format)
       val tables = new Tables(sqlContext, tpcdsToolPath, scale)
       tables.genData(
         loc, format, true, false, true, false, false, "store_sales", partitions)
@@ -127,10 +128,10 @@ object OapBenchmarkDataBuilder extends OapPerfSuiteContext {
 
       sqlContext.createExternalTable("store_sales", dataLocation + "store_sales", dataFormat)
       sqlContext.createExternalTable("store_sales_dup", dataLocation + "store_sales_dup", dataFormat)
-      println("File size of orignial table store_sales in oap format: " +
+      logWarning("File size of orignial table store_sales in oap format: " +
         TestUtil.calculateFileSize("store_sales", dataLocation, dataFormat)
       )
-      println("Records of table store_sales: " +
+      logWarning("Records of table store_sales: " +
         spark.read.format(dataFormat).load(dataLocation + "store_sales").count()
       )
     }
@@ -143,7 +144,7 @@ object OapBenchmarkDataBuilder extends OapPerfSuiteContext {
       try {
         spark.sql(s"DROP OINDEX ${table}_${attr}_index ON $table")
       } catch {
-        case _ => println("Index doesn't exist, so don't need to drop here!")
+        case _: Throwable => logWarning("Index doesn't exist, so don't need to drop here!")
       } finally {
         TestUtil.time(
           spark.sql(
@@ -151,7 +152,7 @@ object OapBenchmarkDataBuilder extends OapPerfSuiteContext {
           ),
           s"Create B-Tree index on ${table}(${attr}) cost "
         )
-        println(s"The size of B-Tree index on ${table}(${attr}) cost:" +
+        logWarning(s"The size of B-Tree index on ${table}(${attr}) cost:" +
           TestUtil.calculateIndexSize(table, tablePath, attr))
       }
     }
@@ -160,7 +161,7 @@ object OapBenchmarkDataBuilder extends OapPerfSuiteContext {
       try {
         spark.sql(s"DROP OINDEX ${table}_${attr}_index ON $table")
       } catch {
-        case _ => println("Index doesn't exist, so don't need to drop here!")
+        case _: Throwable => logWarning("Index doesn't exist, so don't need to drop here!")
       } finally {
         TestUtil.time(
           spark.sql(
@@ -168,7 +169,7 @@ object OapBenchmarkDataBuilder extends OapPerfSuiteContext {
           ),
           s"Create Bitmap index on ${table}(${attr}) cost"
         )
-        println(s"The size of Bitmap index on ${table}(${attr}) cost:" +
+        logWarning(s"The size of Bitmap index on ${table}(${attr}) cost:" +
           TestUtil.calculateIndexSize(table, tablePath, attr))
       }
     }
@@ -178,8 +179,8 @@ object OapBenchmarkDataBuilder extends OapPerfSuiteContext {
     val dataFormats: Seq[String] = Seq("oap", "parquet")
 
     dataFormats.foreach { dataFormat => {
-        spark.sql(s"USE ${getDatabase(dataFormat)}")
-        val tableLocation: String = formatTableLocation(hdfsRootDir, versionNum, getDatabase(dataFormat))
+        spark.sql(s"use ${getDatabase(dataFormat)}")
+        val tableLocation: String = formatTableLocation(hdfsRootDir, versionNum, dataFormat)
         buildBtreeIndex(tableLocation, "store_sales", "ss_customer_sk")
         buildBitmapIndex(tableLocation, "store_sales", "ss_item_sk1")
       }
