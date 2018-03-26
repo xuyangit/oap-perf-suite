@@ -5,6 +5,8 @@ jarPath=/home/oap/oap
 OAP_HOME=/home/oap
 scriptName=$(basename $BASH_SOURCE)
 workDir=`cd ${BASH_SOURCE%/*}; pwd`
+suites="Suite"
+declare -A prToCommits
 # source environment variables and check requirements
 
 function sourceEnv {
@@ -61,6 +63,22 @@ function genData {
     -d
 }
 
+function compileOapAndRun {
+    cd ${workDir}/OAP
+    if ! mvn -q -DskipTests package 1>&3 2>&3; then return 1; fi
+    versionNum=$(grep -o "<version>.*</version>" pom.xml | head -n 1 | sed "s/<[a-z/]*>//g")
+    ln -f target/oap-${versionNum}.jar ${jarPath}/oap.jar
+    cd ${workDir}
+    $SPARK_HOME/bin/spark-submit \
+    --master yarn \
+    --deploy-mode client \
+    --class org.apache.spark.sql.OapPerfSuite \
+    ${workDir}/oap-perf-suite/target/scala-2.11/oap-perf-suite-assembly-1.0.jar \
+    -r 5 \
+    -s ${suites} \
+    >./testres_$1 \
+    2>&3
+}
 # create task directory and run periodic task
 function runTask {
     cloneAndBuild
@@ -69,24 +87,33 @@ function runTask {
         # git checkout oap commit
         cd ${workDir}/OAP && git fetch origin pull/${pr}/head:${pr}
         if [ "$?" -ne 0 ]; then
-            echo "$pr is not valid commit id and passsed!"
+            echo "$pr is not valid pr number and passsed!"
             continue
         fi
         git checkout ${pr}
         echo `git rev-parse HEAD`
-        if ! mvn -q -DskipTests package 1>&3 2>&3; then return 1; fi
-        versionNum=$(grep -o "<version>.*</version>" pom.xml | head -n 1 | sed "s/<[a-z/]*>//g")
-        ln -f target/oap-${versionNum}.jar ${jarPath}/oap.jar
-		cd ${workDir}
-        $SPARK_HOME/bin/spark-submit \
-        --master yarn \
-        --deploy-mode client \
-        --class org.apache.spark.sql.OapPerfSuite \
-        ${workDir}/oap-perf-suite/target/scala-2.11/oap-perf-suite-assembly-1.0.jar \
-        -r 5 \
-        -s $suites \
-        1>./testres_${pr} \
-        2>&3
+        compileOapAndRun ${pr}
+        cd ${workDir}/OAP && git checkout master && git branch -D ${pr}
+    done
+    for pr in ${!prToCommits[@]}; do
+        commits=${prToCommits[$pr]}
+        commitList=(`echo ${commits#*:} | sed "s/,/ /g"`)
+        cd ${workDir}/OAP && git fetch origin pull/${pr}/head:${pr}
+        if [ "$?" -ne 0 ]; then
+            echo "$pr is not valid pr number and passed!"
+            continue
+        fi
+        cd ${workDir}/OAP && git checkout ${pr}
+        curCommit=`git rev-parse HEAD`
+        for commit in ${commitList[@]}; do
+            cd ${workDir}/OAP && git reset --hard $commit
+            if [ "$?" -ne 0 ]; then
+                echo "$commit is not included in $pr pull request!"
+                continue
+            fi
+            echo `git rev-parse HEAD`
+            compileOapAndRun "${pr}_${commit}"
+        done
         cd ${workDir}/OAP && git checkout master && git branch -D ${pr}
     done
 }
@@ -103,7 +130,19 @@ function main {
                 if [ -n "$1" ]; then
                     prList=(${1//,/ })
                 else
-                    echo "Pls enter pr commit id, sep by domma!"
+                    echo "Pls enter pr numbers, sep by domma!"
+                    exit 1
+                fi
+                ;;
+            -c)
+                shift
+                if [ -n "$1" ]; then
+                    if echo "$1" | grep -Eq "^[[:digit:]]+:([a-zA-Z0-9]+,)*([a-zA-Z0-9])+$"; then
+                        prNum=${1%%:*}
+                        prToCommits[$prNum]=${1#*:}
+                    fi
+                else 
+                    echo "Pls enter commit ids, sep by domma!"
                     exit 1
                 fi
                 ;;
@@ -112,7 +151,6 @@ function main {
                 if [ -n "$1" ]; then
                     suites="$1"
                 else
-                    suites=all
                     echo "No suites assigned, default run all suites!"
                 fi
                 ;;
